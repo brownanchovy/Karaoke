@@ -1,12 +1,19 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+
+# 모델 재학습
+# ppt 만들고 발표 영상
+# easter egg 페르소나 손동작 넣으면 음악 혹은 동영상 출력
+import sys
+from PyQt5.QtWidgets import QApplication, QWidget
+from PyQt5.QtGui import QCursor, QPixmap
+from PyQt5.QtCore import Qt
+
 import csv
 import copy
 import argparse
 import itertools
-from collections import Counter
 from collections import deque
-import time
 
 import cv2 as cv
 import numpy as np
@@ -15,8 +22,6 @@ import pyautogui
 
 from utils import CvFpsCalc
 from model import KeyPointClassifier
-from model import PointHistoryClassifier
-
 
 def get_args():
     #파이썬을 터미널에서 실행할 시, argument를 지정해주지 않으면 아래 값으로 지정됨
@@ -42,6 +47,8 @@ def get_args():
 
 
 def main():
+    screen_width, screen_height = pyautogui.size()
+
     # Argument parsing #################################################################
     args = get_args()
 
@@ -71,21 +78,12 @@ def main():
 
     keypoint_classifier = KeyPointClassifier()
 
-    point_history_classifier = PointHistoryClassifier()
-
     # Read labels ###########################################################
     with open('model/keypoint_classifier/keypoint_classifier_label.csv',
               encoding='utf-8-sig') as f:
         keypoint_classifier_labels = csv.reader(f)
         keypoint_classifier_labels = [
             row[0] for row in keypoint_classifier_labels
-        ]
-    with open(
-            'model/point_history_classifier/point_history_classifier_label.csv',
-            encoding='utf-8-sig') as f:
-        point_history_classifier_labels = csv.reader(f)
-        point_history_classifier_labels = [
-            row[0] for row in point_history_classifier_labels
         ]
 
     # FPS Measurement ########################################################
@@ -101,6 +99,7 @@ def main():
     #  ########################################################################
     mode = 0
 
+    # 본격적인 시작
     while True:
         fps = cvFpsCalc.get()
 
@@ -115,7 +114,12 @@ def main():
         if not ret:
             break
         image = cv.flip(image, 1)  # Mirror display
+        h, w, _ = image.shape
         debug_image = copy.deepcopy(image) #image의 복사본
+        #이전 프레임의 거리 초기화
+        prev_thumb_index_distance = None
+        prev_thumb_middle_distance = None
+        prev_index_middle_distance = None
 
         # Detection implementation #############################################################
         image = cv.cvtColor(image, cv.COLOR_BGR2RGB) #image로 리턴
@@ -127,6 +131,24 @@ def main():
         if results.multi_hand_landmarks is not None:
             for hand_landmarks, handedness in zip(results.multi_hand_landmarks,
                                                   results.multi_handedness):
+
+                # 랜드마크 좌표 가져오기
+                thumb_tip = hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP]
+                index_finger_tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
+                middle_finger_tip = hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
+
+                # 화면 좌표 변환
+                thumb_x, thumb_y = int(thumb_tip.x * w), int(thumb_tip.y * h)
+                index_x, index_y = int(index_finger_tip.x * w), int(index_finger_tip.y * h)
+                middle_x, middle_y = int(middle_finger_tip.x * w), int(middle_finger_tip.y * h)
+
+                # 엄지손가락과 검지손가락의 거리 계산
+                thumb_index_distance = np.linalg.norm(np.array([thumb_x, thumb_y]) - np.array([index_x, index_y]))
+                # 엄지손가락과 중지손가락의 거리 계산
+                thumb_middle_distance = np.linalg.norm(np.array([thumb_x, thumb_y]) - np.array([middle_x, middle_y]))
+                # 검지손가락과 중지손가락의 거리 계산
+                index_middle_distance = np.linalg.norm(np.array([index_x, index_y]) - np.array([middle_x, middle_y]))
+
                 # Bounding box calculation
                 brect = calc_bounding_rect(debug_image, hand_landmarks)
                 # Landmark calculation
@@ -141,24 +163,46 @@ def main():
                 logging_csv(number, mode, pre_processed_landmark_list,
                             pre_processed_point_history_list)
 
-                # Hand sign classification
+                # Hand sign classification-------------------------------------------------------
                 hand_sign_id = keypoint_classifier(pre_processed_landmark_list) #call funct 이용 #TF
                 if hand_sign_id == 2:  # Point gesture
                     point_history.append(landmark_list[8])
                 else:
                     point_history.append([0, 0])
 
-                # Finger gesture classification
-                finger_gesture_id = 0
-                point_history_len = len(pre_processed_point_history_list) #point_history_list 의 값이 chain literator로 인해 길이가 2배가 되었을 경우 즉 모든 값이 찾을 경우
-                if point_history_len == (history_length * 2):
-                    finger_gesture_id = point_history_classifier( #TF
-                        pre_processed_point_history_list)
+                #이동
+                if hand_sign_id == 2:
+                    pyautogui.moveTo(index_x / w * screen_width, index_y / h * screen_height)
 
-                # Calculates the gesture IDs in the latest detection
-                finger_gesture_history.append(finger_gesture_id)
-                most_common_fg_id = Counter(
-                    finger_gesture_history).most_common()
+                #스크롤 -- 스크롤 빠르기 손동작 변화에 맞추어 조정
+                if hand_sign_id == 3:
+                    if abs(index_y-middle_y) < 10 and prev_thumb_middle_distance is not None :
+                        if abs(thumb_middle_distance - prev_thumb_middle_distance) > 5:
+                            pyautogui.scroll(thumb_middle_distance-prev_thumb_middle_distance)  # 스크롤 업
+                    # 좌클릭
+                    elif hand_sign_id == 3 and thumb_index_distance < 20:
+                        pyautogui.click()
+                    # 우클릭
+                    elif hand_sign_id == 3 and thumb_middle_distance < 20:
+                        pyautogui.rightClick()
+                    else:
+                        pass
+                else:
+                    pass
+
+                # 확대 축소 검지와 중지 거리를 재서 사용
+                if hand_sign_id == 4 and prev_index_middle_distance is not None:
+                    if index_middle_distance > prev_index_middle_distance + 5:
+                        pyautogui.hotkey('ctrl', '+')  # 확대
+                    elif index_middle_distance < prev_index_middle_distance - 5:
+                        pyautogui.hotkey('ctrl', '-')  # 축소
+
+                if hand_sign_id == 0:
+                    pyautogui.hotkey('window', 'tab')
+
+                # 거리 업데이트
+                prev_thumb_middle_distance = thumb_middle_distance
+                prev_index_middle_distance = index_middle_distance
 
                 ##############
                 # Drawing part
@@ -168,9 +212,7 @@ def main():
                     debug_image,
                     brect,
                     handedness,
-                    keypoint_classifier_labels[hand_sign_id],
-                    point_history_classifier_labels[most_common_fg_id[0][0]],
-                )
+                    keypoint_classifier_labels[hand_sign_id])
         else:
             point_history.append([0, 0])
 
@@ -183,6 +225,48 @@ def main():
     cap.release()
     cv.destroyAllWindows()
 
+
+class CustomCursorApp(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.initUI()
+
+    def initUI(self):
+        # 기본 커서 이미지 설정
+        self.default_pixmap = QPixmap(r'C:\Users\USER\Desktop\No_Touch\cursor\m.png')  # 기본 커서 이미지 파일 경로
+        self.click_pixmap = QPixmap(r'C:\Users\USER\Desktop\No_Touch\cursor\m1.png')  # 좌클릭 시 커서 이미지 파일 경로
+        self.right_click_pixmap = QPixmap(r'C:\Users\USER\Desktop\No_Touch\cursor\m2.png')  # 우클릭 시 커서 이미지 파일 경로
+
+        # 커서 이미지 크기 조정
+        self.scaled_default_pixmap = self.default_pixmap.scaled(150, 150)
+        self.scaled_click_pixmap = self.click_pixmap.scaled(125, 150)
+        self.scaled_right_click_pixmap = self.right_click_pixmap.scaled(125, 150)
+
+        # 기본 커서 설정
+        self.setCursor(QCursor(self.scaled_default_pixmap))
+
+        # 창의 기본 설정
+        self.setWindowTitle('Custom Cursor Example')
+        self.showFullScreen()  # 전체 화면 모드로 설정
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            # 좌클릭 시 커서를 클릭 커서로 변경
+            self.setCursor(QCursor(self.scaled_click_pixmap))
+        elif event.button() == Qt.RightButton:
+            # 우클릭 시 커서를 우클릭 커서로 변경
+            self.setCursor(QCursor(self.scaled_right_click_pixmap))
+
+    """ #커서 사진 변환 일시적, 가시적으로 안보임
+    def mouseReleaseEvent(self, event):
+        if event.button() in [Qt.LeftButton, Qt.RightButton]:
+            # 마우스 버튼 릴리즈 시 커서를 기본 커서로 변경
+            self.setCursor(QCursor(self.scaled_default_pixmap))
+    """
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            # ESC 키를 누르면 애플리케이션 종료
+            self.close()
 
 def select_mode(key, mode):
     number = -1
@@ -494,8 +578,7 @@ def draw_bounding_rect(use_brect, image, brect):
     return image
 
 
-def draw_info_text(image, brect, handedness, hand_sign_text,
-                   finger_gesture_text):
+def draw_info_text(image, brect, handedness, hand_sign_text,):
     cv.rectangle(image, (brect[0], brect[1]), (brect[2], brect[1] - 22),
                  (0, 0, 0), -1)
 
@@ -504,13 +587,6 @@ def draw_info_text(image, brect, handedness, hand_sign_text,
         info_text = info_text + ':' + hand_sign_text
     cv.putText(image, info_text, (brect[0] + 5, brect[1] - 4),
                cv.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv.LINE_AA)
-
-    if finger_gesture_text != "":
-        cv.putText(image, "Finger Gesture:" + finger_gesture_text, (10, 60),
-                   cv.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 4, cv.LINE_AA)
-        cv.putText(image, "Finger Gesture:" + finger_gesture_text, (10, 60),
-                   cv.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2,
-                   cv.LINE_AA)
 
     return image
 
@@ -543,4 +619,7 @@ def draw_info(image, fps, mode, number):
 
 
 if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    ex = CustomCursorApp()
     main()
+    sys.exit(app.exec_())
